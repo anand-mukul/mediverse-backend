@@ -4,6 +4,8 @@ python-dotenv>=1.0.0
 motor>=3.3.0
 pydantic>=2.6.0
 pydantic-settings>=2.1.0
+bcrypt==4.1.2
+pyjwt==2.8.0
 httpx>=0.26.0
 twilio>=8.11.0
 paho-mqtt>=1.6.1
@@ -11,3 +13,4 @@ deepgram-sdk>=3.2.0
 websockets>=12.0
 python-multipart>=0.0.7
 deepgram-sdk==3.2.0   
+pydantic[email]
