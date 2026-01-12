@@ -163,14 +163,28 @@ class EmergencyLog(BaseModel):
     responders_notified: List[str] = []
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+class PrescriptionUploadResponse(BaseModel):
+    id: str
+    user_id: str
+    file_name: str
+    file_url: str
+    status: str = "pending_review"
+    uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
 # ==================== INPUT MODELS ====================
 class VoiceTranscribeRequest(BaseModel):
     audio_base64: Optional[str] = None
     audio_url: Optional[str] = None
 
 class AIIntentRequest(BaseModel):
-    text: str
+    text: Optional[str] = None  # Made text optional
+    query: Optional[str] = None  # Added query field as alternative
     user_context: Optional[Dict[str, Any]] = {}
+    
+    @property
+    def get_text(self) -> str:
+        """Get text from either text or query field"""
+        return self.text or self.query or ""
 
 class AppointmentBookRequest(BaseModel):
     user_id: str
@@ -439,13 +453,17 @@ async def voice_stream(websocket: WebSocket):
 async def analyze_intent(request: AIIntentRequest):
     if not os.environ.get('GROQ_API_KEY'):
         raise HTTPException(status_code=503, detail="Groq API not configured")
-    return await groq_intent_analysis(request.text, request.user_context)
+    return await groq_intent_analysis(request.get_text, request.user_context) # Use get_text property
 
 @api_router.post("/ai/chat")
 async def ai_chat(request: AIIntentRequest):
     if not os.environ.get('GROQ_API_KEY'):
         raise HTTPException(status_code=503, detail="Groq API not configured")
         
+    command_text = request.get_text # Use get_text property
+    if not command_text:
+        raise HTTPException(status_code=422, detail="Please provide a text or query field")
+
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             headers = {
@@ -456,7 +474,7 @@ async def ai_chat(request: AIIntentRequest):
                 "model": "llama-3.3-70b-versatile",
                 "messages": [
                     {"role": "system", "content": "You are a helpful medical assistant."},
-                    {"role": "user", "content": request.text}
+                    {"role": "user", "content": command_text} # Use command_text
                 ]
             }
             response = await client.post(
@@ -826,23 +844,66 @@ async def create_pharmacy_order(
     user_id: str,
     items: List[Dict[str, Any]],
     shipping_address: Dict[str, Any],
+    prescription_id: Optional[str] = None,  # Added prescription_id parameter
     current_user: dict = Depends(get_current_user)
 ):
     """Create pharmacy order"""
     if user_id != current_user["id"]:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
+    requires_prescription = False
+    for item in items:
+        med_id = item.get("medicationId")
+        if med_id:
+            medication = await db.medications.find_one({"id": med_id})
+            if medication and medication.get("requiresPrescription"):
+                requires_prescription = True
+                break
+    
+    if requires_prescription and not prescription_id:
+        raise HTTPException(status_code=400, detail="Prescription required for one or more items")
+    
+    expanded_items = []
+    total_amount = 0
+    
+    for item in items:
+        med_id = item.get("medicationId")
+        quantity = item.get("quantity", 1)
+        
+        medication = await db.medications.find_one({"id": med_id}, {"_id": 0})
+        if not medication:
+            raise HTTPException(status_code=404, detail=f"Medication {med_id} not found")
+        
+        item_total = medication.get("price", 0) * quantity
+        total_amount += item_total
+        
+        expanded_items.append({
+            "medication": medication,
+            "quantity": quantity,
+            "price": medication.get("price", 0)
+        })
+    
     order_doc = {
         "id": str(uuid.uuid4()),
         "user_id": user_id,
-        "items": items,
+        "items": expanded_items,
         "shipping_address": shipping_address,
+        "prescription_id": prescription_id,  # Store prescription reference
         "status": "pending",
-        "total_amount": sum(item.get("price", 0) * item.get("quantity", 1) for item in items),
-        "created_at": datetime.utcnow().isoformat()
+        "total_amount": total_amount,
+        "totalAmount": total_amount,  # Alias for frontend compatibility
+        "order_date": datetime.utcnow().isoformat(),
+        "orderDate": datetime.utcnow().isoformat(),  # Alias for frontend compatibility
+        "created_at": datetime.utcnow().isoformat(),
+        "payment_method": "COD",  # Default to Cash on Delivery
+        "paymentMethod": "COD"
     }
     
     await db.orders.insert_one(order_doc)
+    
+    # Remove MongoDB _id
+    order_doc.pop("_id", None)
+    
     return order_doc
 
 @api_router.get("/pharmacy/orders/{user_id}")
@@ -870,6 +931,57 @@ async def track_order(order_id: str, current_user: dict = Depends(get_current_us
         raise HTTPException(status_code=403, detail="Unauthorized")
     
     return order
+
+@api_router.post("/pharmacy/prescriptions/upload")
+async def upload_prescription(
+    user_id: str,
+    file: bytes = File(...),  # Use File(...) to indicate it's a file upload
+    file_name: str = Form(...), # Use Form(...) for other form fields
+    current_user: dict = Depends(get_current_user)
+):
+    """Upload prescription for pharmacy orders"""
+    if user_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    try:
+        # In production, upload to cloud storage (S3, GCS, etc.)
+        # For now, we'll simulate the upload
+        prescription_id = str(uuid.uuid4())
+        
+        prescription_doc = {
+            "id": prescription_id,
+            "user_id": user_id,
+            "file_name": file_name,
+            "file_url": f"/uploads/prescriptions/{prescription_id}/{file_name}",
+            "status": "pending_review",
+            "uploaded_at": datetime.utcnow().isoformat(),
+            "reviewed_at": None,
+            "reviewed_by": None,
+            "notes": None
+        }
+        
+        await db.prescriptions_uploads.insert_one(prescription_doc)
+        
+        logger.info(f"✅ Prescription uploaded: {prescription_id}")
+        
+        prescription_doc.pop("_id", None)
+        return prescription_doc
+    except Exception as e:
+        logger.error(f"❌ Prescription upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+@api_router.get("/pharmacy/prescriptions/{user_id}")
+async def get_user_prescriptions(
+    user_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get user's uploaded prescriptions"""
+    if user_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    cursor = db.prescriptions_uploads.find({"user_id": user_id}, {"_id": 0}).sort("uploaded_at", -1)
+    prescriptions = await cursor.to_list(length=50)
+    return prescriptions
 
 # IoT Devices Endpoint
 @api_router.get("/iot/devices/{user_id}")
@@ -913,23 +1025,28 @@ async def get_health_metrics(
 @api_router.post("/voice/query")
 async def process_voice_query(request: AIIntentRequest):
     """Process voice command query"""
+    command_text = request.get_text
+    
+    if not command_text:
+        raise HTTPException(status_code=422, detail="Please provide a text or query field")
+    
     if not os.environ.get('GROQ_API_KEY'):
         return {
             "id": str(uuid.uuid4()),
-            "command": request.text,
+            "command": command_text,
             "response": "Voice assistant is not configured. Please add GROQ_API_KEY to environment variables.",
             "timestamp": datetime.utcnow().isoformat(),
             "successful": False
         }
     
     try:
-        result = await groq_intent_analysis(request.text, request.user_context)
+        result = await groq_intent_analysis(command_text, request.user_context)
         
         # Store command history
         command_doc = {
             "id": str(uuid.uuid4()),
-            "command": request.text,
-            "query": request.text,
+            "command": command_text,
+            "query": command_text,
             "intent": result.get("intent"),
             "action": result.get("action"),
             "response": result.get("response"),
@@ -945,7 +1062,7 @@ async def process_voice_query(request: AIIntentRequest):
         logger.error(f"Voice query failed: {str(e)}")
         return {
             "id": str(uuid.uuid4()),
-            "command": request.text,
+            "command": command_text,
             "response": "I'm having trouble processing your request right now. Please try again later.",
             "timestamp": datetime.utcnow().isoformat(),
             "successful": False
