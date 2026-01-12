@@ -171,6 +171,18 @@ class PrescriptionUploadResponse(BaseModel):
     status: str = "pending_review"
     uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    blood_type: Optional[str] = None
+    emergency_contact: Optional[str] = None
+    allergies: Optional[List[str]] = None
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_password: str
+
 # ==================== INPUT MODELS ====================
 class VoiceTranscribeRequest(BaseModel):
     audio_base64: Optional[str] = None
@@ -1346,6 +1358,91 @@ async def get_current_user_info(current_user: dict = Depends(get_current_user)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
+
+@api_router.put("/auth/profile")
+async def update_profile(
+    profile_data: UserUpdate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update user profile information"""
+    user_id = current_user["id"]
+    
+    # Build update document (only include non-None fields)
+    update_doc = {}
+    if profile_data.name is not None:
+        update_doc["name"] = profile_data.name
+    if profile_data.phone is not None:
+        update_doc["phone"] = profile_data.phone
+    if profile_data.blood_type is not None:
+        update_doc["blood_type"] = profile_data.blood_type
+    if profile_data.emergency_contact is not None:
+        update_doc["emergency_contact"] = profile_data.emergency_contact
+    if profile_data.allergies is not None:
+        update_doc["allergies"] = profile_data.allergies
+    
+    if not update_doc:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    
+    # Update user in database
+    result = await db.users.update_one(
+        {"id": user_id},
+        {"$set": update_doc}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Fetch and return updated user
+    updated_user = await db.users.find_one(
+        {"id": user_id},
+        {"_id": 0, "password": 0}
+    )
+    
+    return {
+        "success": True,
+        "message": "Profile updated successfully",
+        "user": updated_user
+    }
+
+@api_router.post("/auth/change-password")
+async def change_password(
+    password_data: PasswordChangeRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Change user password"""
+    user_id = current_user["id"]
+    
+    # Validate new password matches confirm password
+    if password_data.new_password != password_data.confirm_password:
+        raise HTTPException(status_code=400, detail="New passwords do not match")
+    
+    # Validate new password strength
+    is_valid, error_msg = validate_password(password_data.new_password)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_msg)
+    
+    # Fetch user
+    user = await db.users.find_one({"id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Verify current password
+    if not bcrypt.checkpw(password_data.current_password.encode('utf-8'), user["password"].encode('utf-8')):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    
+    # Hash new password
+    hashed_password = bcrypt.hashpw(password_data.new_password.encode('utf-8'), bcrypt.gensalt())
+    
+    # Update password in database
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"password": hashed_password.decode('utf-8')}}
+    )
+    
+    return {
+        "success": True,
+        "message": "Password changed successfully"
+    }
 
 # Health Score Endpoint
 @api_router.get("/health/score/{user_id}")
