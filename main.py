@@ -183,6 +183,28 @@ class PasswordChangeRequest(BaseModel):
     new_password: str
     confirm_password: str
 
+class OrderItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    medicationId: str
+    quantity: int = 1
+    prescriptionId: Optional[str] = None
+
+class ShippingAddress(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    street: str
+    city: str
+    state: str
+    zipCode: str
+    country: str = "India"
+
+class CreateOrderRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    userId: str
+    items: List[OrderItem]
+    shippingAddress: ShippingAddress
+    prescriptionId: Optional[str] = None
+
+
 # ==================== INPUT MODELS ====================
 class VoiceTranscribeRequest(BaseModel):
     audio_base64: Optional[str] = None
@@ -853,70 +875,79 @@ async def get_medications(category: Optional[str] = None, search: Optional[str] 
 # Pharmacy Order Endpoint
 @api_router.post("/pharmacy/orders")
 async def create_pharmacy_order(
-    user_id: str,
-    items: List[Dict[str, Any]],
-    shipping_address: Dict[str, Any],
-    prescription_id: Optional[str] = None,  # Added prescription_id parameter
+    order_request: CreateOrderRequest,
     current_user: dict = Depends(get_current_user)
 ):
-    """Create pharmacy order"""
-    if user_id != current_user["id"]:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
-    requires_prescription = False
-    for item in items:
-        med_id = item.get("medicationId")
-        if med_id:
-            medication = await db.medications.find_one({"id": med_id})
-            if medication and medication.get("requiresPrescription"):
-                requires_prescription = True
-                break
-    
-    if requires_prescription and not prescription_id:
-        raise HTTPException(status_code=400, detail="Prescription required for one or more items")
-    
-    expanded_items = []
-    total_amount = 0
-    
-    for item in items:
-        med_id = item.get("medicationId")
-        quantity = item.get("quantity", 1)
+    """Create pharmacy order with proper validation"""
+    try:
+        user_id = order_request.userId
+        items = order_request.items
+        shipping_address = order_request.shippingAddress.model_dump()
+        prescription_id = order_request.prescriptionId
         
-        medication = await db.medications.find_one({"id": med_id}, {"_id": 0})
-        if not medication:
-            raise HTTPException(status_code=404, detail=f"Medication {med_id} not found")
+        if user_id != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Unauthorized")
         
-        item_total = medication.get("price", 0) * quantity
-        total_amount += item_total
+        if not items or len(items) == 0:
+            raise HTTPException(status_code=400, detail="Cart cannot be empty")
         
-        expanded_items.append({
-            "medication": medication,
-            "quantity": quantity,
-            "price": medication.get("price", 0)
-        })
-    
-    order_doc = {
-        "id": str(uuid.uuid4()),
-        "user_id": user_id,
-        "items": expanded_items,
-        "shipping_address": shipping_address,
-        "prescription_id": prescription_id,  # Store prescription reference
-        "status": "pending",
-        "total_amount": total_amount,
-        "totalAmount": total_amount,  # Alias for frontend compatibility
-        "order_date": datetime.utcnow().isoformat(),
-        "orderDate": datetime.utcnow().isoformat(),  # Alias for frontend compatibility
-        "created_at": datetime.utcnow().isoformat(),
-        "payment_method": "COD",  # Default to Cash on Delivery
-        "paymentMethod": "COD"
-    }
-    
-    await db.orders.insert_one(order_doc)
-    
-    # Remove MongoDB _id
-    order_doc.pop("_id", None)
-    
-    return order_doc
+        requires_prescription = False
+        for item in items:
+            med_id = item.medicationId
+            if med_id:
+                medication = await db.medications.find_one({"id": med_id})
+                if medication and medication.get("requiresPrescription"):
+                    requires_prescription = True
+                    break
+        
+        if requires_prescription and not prescription_id:
+            raise HTTPException(status_code=400, detail="Prescription required for one or more items")
+        
+        expanded_items = []
+        total_amount = 0
+        
+        for item in items:
+            med_id = item.medicationId
+            quantity = item.quantity
+            
+            medication = await db.medications.find_one({"id": med_id}, {"_id": 0})
+            if not medication:
+                raise HTTPException(status_code=404, detail=f"Medication {med_id} not found")
+            
+            item_total = medication.get("price", 0) * quantity
+            total_amount += item_total
+            
+            expanded_items.append({
+                "medication": medication,
+                "quantity": quantity,
+                "price": medication.get("price", 0)
+            })
+        
+        order_doc = {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "items": expanded_items,
+            "shipping_address": shipping_address,
+            "prescription_id": prescription_id,
+            "status": "pending",
+            "total_amount": total_amount,
+            "totalAmount": total_amount,
+            "order_date": datetime.utcnow().isoformat(),
+            "orderDate": datetime.utcnow().isoformat(),
+            "created_at": datetime.utcnow().isoformat(),
+            "payment_method": "COD",
+            "paymentMethod": "COD"
+        }
+        
+        await db.orders.insert_one(order_doc)
+        order_doc.pop("_id", None)
+        
+        return order_doc
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Order creation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Order creation failed: {str(e)}")
 
 @api_router.get("/pharmacy/orders/{user_id}")
 async def get_user_orders_pharmacy(
