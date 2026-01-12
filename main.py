@@ -973,6 +973,20 @@ async def track_order(order_id: str, current_user: dict = Depends(get_current_us
     if order["user_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
+    if "shippingAddress" not in order or not order["shippingAddress"]:
+        order["shippingAddress"] = {
+            "street": "Not provided",
+            "city": "Not provided",
+            "state": "Not provided",
+            "zipCode": "Not provided",
+            "country": "Not provided"
+        }
+    
+    # Ensure all required fields exist with defaults
+    order.setdefault("paymentMethod", "Not specified")
+    order.setdefault("status", "pending")
+    order.setdefault("orderDate", datetime.utcnow().isoformat())
+    
     return order
 
 @api_router.post("/pharmacy/prescriptions/upload")
