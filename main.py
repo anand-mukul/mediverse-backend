@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Depends, Header
+from fastapi import FastAPI, APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Depends, Header, File, UploadFile
 from contextlib import asynccontextmanager
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
@@ -935,8 +935,7 @@ async def track_order(order_id: str, current_user: dict = Depends(get_current_us
 @api_router.post("/pharmacy/prescriptions/upload")
 async def upload_prescription(
     user_id: str,
-    file: bytes = File(...),  # Use File(...) to indicate it's a file upload
-    file_name: str = Form(...), # Use Form(...) for other form fields
+    file: UploadFile = File(...),  # Use UploadFile for handling file uploads
     current_user: dict = Depends(get_current_user)
 ):
     """Upload prescription for pharmacy orders"""
@@ -947,12 +946,18 @@ async def upload_prescription(
         # In production, upload to cloud storage (S3, GCS, etc.)
         # For now, we'll simulate the upload
         prescription_id = str(uuid.uuid4())
+        file_name = file.filename # Get filename from UploadFile object
+        
+        # Ensure directory exists for the file (simulated)
+        # os.makedirs(f"/uploads/prescriptions/{prescription_id}/", exist_ok=True)
+        # with open(f"/uploads/prescriptions/{prescription_id}/{file_name}", "wb") as buffer:
+        #     buffer.write(await file.read())
         
         prescription_doc = {
             "id": prescription_id,
             "user_id": user_id,
             "file_name": file_name,
-            "file_url": f"/uploads/prescriptions/{prescription_id}/{file_name}",
+            "file_url": f"/uploads/prescriptions/{prescription_id}/{file_name}", # Simulated URL
             "status": "pending_review",
             "uploaded_at": datetime.utcnow().isoformat(),
             "reviewed_at": None,
@@ -962,7 +967,7 @@ async def upload_prescription(
         
         await db.prescriptions_uploads.insert_one(prescription_doc)
         
-        logger.info(f"✅ Prescription uploaded: {prescription_id}")
+        logger.info(f"✅ Prescription uploaded: {prescription_id} - Filename: {file_name}")
         
         prescription_doc.pop("_id", None)
         return prescription_doc
